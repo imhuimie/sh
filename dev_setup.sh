@@ -52,11 +52,12 @@ detect_distro() {
 }
 
 # 安装必要基础工具
-install_essential_tools() {
+install_base_tools() {
     print_info "安装必要基础工具..."
     
     case $DISTRO in
         ubuntu|debian)
+            apt update
             apt install -y curl wget
             ;;
         centos|rhel|fedora)
@@ -66,9 +67,16 @@ install_essential_tools() {
                 yum install -y curl wget
             fi
             ;;
+        *)
+            print_error "不支持的 Linux 发行版: $DISTRO"
+            exit 1
+            ;;
     esac
     
     print_success "必要基础工具安装完成"
+    
+    # 安装可选基础工具
+    install_optional_tools
 }
 
 # 安装可选基础工具
@@ -139,7 +147,7 @@ install_optional_tools() {
             # SSH 服务器
             if $INSTALL_SSH; then
                 print_info "安装 SSH 服务器..."
-                apt install -y ssh
+                apt install -y openssh-server
             fi
             
             # 开发构建工具
@@ -296,6 +304,7 @@ install_python() {
                 apt install -y python3 python3-pip python3-venv python3-dev
             else
                 # 添加 deadsnakes PPA 以获取特定版本的 Python
+                apt install -y software-properties-common
                 add-apt-repository -y ppa:deadsnakes/ppa
                 apt update
                 
@@ -695,6 +704,9 @@ install_docker() {
     
     case $DISTRO in
         ubuntu|debian)
+            # 安装依赖
+            apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
+            
             # 添加 Docker 官方 GPG 密钥
             install -m 0755 -d /etc/apt/keyrings
             curl -fsSL https://download.docker.com/linux/$DISTRO/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -710,20 +722,26 @@ install_docker() {
             apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
         centos|rhel)
-            # 添加 Docker 仓库
-            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-            
-            # 安装 Docker CE
+            # 安装依赖
             if command -v dnf &> /dev/null; then
+                dnf install -y yum-utils
+                # 添加 Docker 仓库
+                dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+                # 安装 Docker CE
                 dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             else
+                yum install -y yum-utils
+                # 添加 Docker 仓库
+                yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+                # 安装 Docker CE
                 yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             fi
             ;;
         fedora)
+            # 安装依赖
+            dnf install -y dnf-plugins-core
             # 添加 Docker 仓库
             dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-            
             # 安装 Docker CE
             dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             ;;
@@ -734,7 +752,11 @@ install_docker() {
     systemctl start docker
     
     # 添加当前用户到 docker 组
-    usermod -aG docker $SUDO_USER
+    if [ -n "$SUDO_USER" ]; then
+        usermod -aG docker $SUDO_USER
+    else
+        print_warning "无法确定当前用户，请手动将用户添加到 docker 组"
+    fi
     
     print_success "Docker CE 安装完成: $(docker --version)"
 }
@@ -755,7 +777,7 @@ show_menu() {
     echo "7) Java 开发环境"
     echo "8) Node.js 和 NVM"
     echo "9) Rust"
-    echo "10) Ruby"
+        echo "10) Ruby"
     echo "11) Docker CE"
     echo "0) 全部安装"
     echo "q) 退出"
@@ -770,6 +792,7 @@ show_menu() {
     
     if [[ "$choices" == "0" ]]; then
         INSTALL_BASE=true
+        INSTALL_OPTIONAL=true
         INSTALL_GIT=true
         INSTALL_CPP=true
         INSTALL_PYTHON=true
@@ -781,6 +804,7 @@ show_menu() {
         INSTALL_DOCKER=true
     else
         INSTALL_BASE=false
+        INSTALL_OPTIONAL=false
         INSTALL_GIT=false
         INSTALL_CPP=false
         INSTALL_PYTHON=false
@@ -794,26 +818,29 @@ show_menu() {
         for choice in $choices; do
             case $choice in
                 1) INSTALL_BASE=true ;;
-                2) INSTALL_GIT=true ;;
-                3) INSTALL_CPP=true ;;
-                4) INSTALL_PYTHON=true ;;
-                5) INSTALL_GOLANG=true ;;
-                6) INSTALL_JAVA=true ;;
-                7) INSTALL_NODEJS=true ;;
-                8) INSTALL_RUST=true ;;
-                9) INSTALL_RUBY=true ;;
-                10) INSTALL_DOCKER=true ;;
+                2) INSTALL_OPTIONAL=true ;;
+                3) INSTALL_GIT=true ;;
+                4) INSTALL_CPP=true ;;
+                5) INSTALL_PYTHON=true ;;
+                6) INSTALL_GOLANG=true ;;
+                7) INSTALL_JAVA=true ;;
+                8) INSTALL_NODEJS=true ;;
+                9) INSTALL_RUST=true ;;
+                10) INSTALL_RUBY=true ;;
+                11) INSTALL_DOCKER=true ;;
                 *) print_warning "忽略无效的选项: $choice" ;;
             esac
         done
     fi
 }
+
 # 确认安装选项
 confirm_installation() {
     echo "=========================================="
     echo "您选择安装以下工具："
     
-    $INSTALL_BASE && echo "- 基础工具"
+    $INSTALL_BASE && echo "- 必要基础工具"
+    $INSTALL_OPTIONAL && echo "- 可选基础工具"
     $INSTALL_GIT && echo "- Git"
     $INSTALL_CPP && echo "- C/C++ 开发环境"
     $INSTALL_PYTHON && echo "- Python3 开发环境"
@@ -832,6 +859,7 @@ confirm_installation() {
         exit 0
     fi
 }
+
 # 主函数
 main() {
     print_info "开始安装开发环境..."
@@ -857,5 +885,7 @@ main() {
     print_info "如果您安装了 NVM，请运行 'source ~/.bashrc' 以使 NVM 环境变量生效"
     print_info "如果您安装了 RVM，请运行 'source /etc/profile.d/rvm.sh' 以使 RVM 环境变量生效"
 }
+
 # 执行主函数
 main
+
