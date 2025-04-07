@@ -769,5 +769,93 @@ show_menu() {
     fi
     
     if [[ "$choices" == "0" ]]; then
-        INSTALL_ESSENTIAL=true
-        INSTALL_OPTIONAL=
+        INSTALL_BASE=true
+        INSTALL_GIT=true
+        INSTALL_CPP=true
+        INSTALL_PYTHON=true
+        INSTALL_GOLANG=true
+        INSTALL_JAVA=true
+        INSTALL_NODEJS=true
+        INSTALL_RUST=true
+        INSTALL_RUBY=true
+        INSTALL_DOCKER=true
+    else
+        INSTALL_BASE=false
+        INSTALL_GIT=false
+        INSTALL_CPP=false
+        INSTALL_PYTHON=false
+        INSTALL_GOLANG=false
+        INSTALL_JAVA=false
+        INSTALL_NODEJS=false
+        INSTALL_RUST=false
+        INSTALL_RUBY=false
+        INSTALL_DOCKER=false
+        
+        for choice in $choices; do
+            case $choice in
+                1) INSTALL_BASE=true ;;
+                2) INSTALL_GIT=true ;;
+                3) INSTALL_CPP=true ;;
+                4) INSTALL_PYTHON=true ;;
+                5) INSTALL_GOLANG=true ;;
+                6) INSTALL_JAVA=true ;;
+                7) INSTALL_NODEJS=true ;;
+                8) INSTALL_RUST=true ;;
+                9) INSTALL_RUBY=true ;;
+                10) INSTALL_DOCKER=true ;;
+                *) print_warning "忽略无效的选项: $choice" ;;
+            esac
+        done
+    fi
+}
+# 确认安装选项
+confirm_installation() {
+    echo "=========================================="
+    echo "您选择安装以下工具："
+    
+    $INSTALL_BASE && echo "- 基础工具"
+    $INSTALL_GIT && echo "- Git"
+    $INSTALL_CPP && echo "- C/C++ 开发环境"
+    $INSTALL_PYTHON && echo "- Python3 开发环境"
+    $INSTALL_GOLANG && echo "- Go (Golang)"
+    $INSTALL_JAVA && echo "- Java 开发环境"
+    $INSTALL_NODEJS && echo "- Node.js 和 NVM"
+    $INSTALL_RUST && echo "- Rust"
+    $INSTALL_RUBY && echo "- Ruby"
+    $INSTALL_DOCKER && echo "- Docker CE"
+    
+    echo "=========================================="
+    read -p "确认安装以上工具？(y/n): " confirm
+    
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        print_info "取消安装"
+        exit 0
+    fi
+}
+# 主函数
+main() {
+    print_info "开始安装开发环境..."
+    
+    check_root
+    detect_distro
+    show_menu
+    confirm_installation
+    
+    $INSTALL_BASE && install_base_tools
+    $INSTALL_GIT && install_git
+    $INSTALL_CPP && install_cpp
+    $INSTALL_PYTHON && install_python
+    $INSTALL_GOLANG && install_golang
+    $INSTALL_JAVA && install_java
+    $INSTALL_NODEJS && install_nodejs
+    $INSTALL_RUST && install_rust
+    $INSTALL_RUBY && install_ruby
+    $INSTALL_DOCKER && install_docker
+    
+    print_success "所有选定的开发工具安装完成！"
+    print_info "请重新登录或运行 'source /etc/profile' 以使环境变量生效"
+    print_info "如果您安装了 NVM，请运行 'source ~/.bashrc' 以使 NVM 环境变量生效"
+    print_info "如果您安装了 RVM，请运行 'source /etc/profile.d/rvm.sh' 以使 RVM 环境变量生效"
+}
+# 执行主函数
+main
