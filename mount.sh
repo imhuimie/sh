@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==========================================
-# Linux 通用硬盘挂载脚本 V7 (终极修复: 父盘识别)
+# Linux 通用硬盘挂载脚本 V5 (修复颜色解析Bug)
 # ==========================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'   # 青色：父磁盘(含分区)
-WHITE='\033[1;37m'  # 高亮白色：真正的空盘
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
 NC='\033[0m'
 
 if [[ $EUID -ne 0 ]]; then
@@ -20,56 +20,41 @@ fi
 echo -e "${BLUE}=== 正在扫描系统中的块设备 ===${NC}"
 echo ""
 
-# ==========================================
-# 核心修复逻辑: 预先获取所有"父亲"设备列表
-# ==========================================
-# 获取所有设备的父级名称(PKNAME)，如果 sda1 存在，PKNAME里就会有 sda
-# 这样不需要对 sda 单独运行命令，避免 "not a block device" 报错
-ALL_PARENTS=$(lsblk -n -o PKNAME | grep -v "^$" | sort | uniq)
-
 echo -e "设备列表:"
 echo "--------------------------------------------------------------------------------"
-printf "%-15s %-10s %-10s %-10s %-25s\n" "设备名" "大小" "类型" "文件系统" "当前状态/挂载点"
+printf "%-15s %-10s %-10s %-10s %-25s\n" "设备名" "大小" "类型" "文件系统" "当前挂载点"
 echo "--------------------------------------------------------------------------------"
 
-# 使用 -P 模式确保解析准确
 lsblk -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read -r line; do
     eval "$line"
     
     if [[ "$TYPE" == "rom" || "$TYPE" == "loop" ]]; then continue; fi
     
-    # 检查当前设备名是否在"父亲名单"里
-    IS_PARENT=0
-    if echo "$ALL_PARENTS" | grep -q -w "$NAME"; then
-        IS_PARENT=1
+    # 检查是否为有子分区的父盘
+    IS_PARENT_DISK=false
+    if [[ "$TYPE" == "disk" ]]; then
+        CHILD_COUNT=$(lsblk -n -o NAME "/dev/$NAME" 2>/dev/null | wc -l)
+        if [ "$CHILD_COUNT" -gt 1 ]; then
+            IS_PARENT_DISK=true
+        fi
     fi
-
-    # --- 颜色判断逻辑 ---
+    
     if [[ -n "$MOUNTPOINT" ]]; then
-        # 黄色：已挂载
         printf "${YELLOW}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "$MOUNTPOINT"
-        
-    elif [[ "$IS_PARENT" -eq 1 ]]; then
-        # 青色：它是父磁盘 (因为它是别人的 PKNAME) -> 保护起来
-        printf "${CYAN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(分区表)" "(含分区-请操作子设备)"
-        
+    elif [[ "$IS_PARENT_DISK" == true ]]; then
+        printf "${CYAN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(物理父盘)" "(勿操作)"
     elif [[ -n "$FSTYPE" ]]; then
-        # 绿色：有文件系统但未挂载
         printf "${GREEN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "(未挂载)"
-        
     else
-        # 白色：既没挂载，也没文件系统，也不是任何人的父亲 -> 真正的空盘
-        printf "${WHITE}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(未格式化)" "(建议挂载)"
+        printf "${WHITE}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(未格式化)" ""
     fi
 done
 echo "--------------------------------------------------------------------------------"
-echo -e "${GREEN}绿色${NC}: 可挂载 | ${YELLOW}黄色${NC}: 已挂载 | ${WHITE}白色${NC}: 空盘(需格式化) | ${CYAN}青色${NC}: 物理父盘(勿动)"
+echo -e "${GREEN}绿色${NC}: 建议挂载 | ${YELLOW}黄色${NC}: 已挂载 | ${WHITE}白色${NC}: 需格式化 | ${CYAN}青色${NC}: 物理父盘(勿动)"
 echo ""
 
-# 交互输入
 echo -e "${YELLOW}请输入要操作的设备名称 (例如: sdb 或 sdb1):${NC}"
 read -r TARGET_DEV_NAME
-# 自动补全 /dev/，并确保不重复
 if [[ "$TARGET_DEV_NAME" != /dev/* ]]; then TARGET_DEV="/dev/$TARGET_DEV_NAME"; else TARGET_DEV="$TARGET_DEV_NAME"; fi
 
 if [ ! -b "$TARGET_DEV" ]; then
@@ -84,91 +69,138 @@ DEV_FSTYPE=$(lsblk -no FSTYPE "$TARGET_DEV")
 
 if [ -z "$DEV_FSTYPE" ]; then
     echo ""
+    echo -e "${WHITE}警告: 检测到设备 $TARGET_DEV 尚未格式化 (无文件系统)。${NC}"
     
-    # V7 安全检查: 使用全局名单再次确认是否为父盘
-    if lsblk -n -o PKNAME | grep -q -w "$(basename "$TARGET_DEV")"; then
-        echo -e "${RED}=======================================================${NC}"
-        echo -e "${RED}严重警告! 你选择了 $TARGET_DEV，这是一个包含分区的物理父盘。${NC}"
-        echo -e "${RED}它下面似乎已经有分区了 (它是其他设备的 PKNAME)。${NC}"
-        echo -e "${RED}如果你继续格式化 $TARGET_DEV，该盘所有分区表都将丢失！${NC}"
-        echo -e "${RED}=======================================================${NC}"
-        read -p "你确定要毁灭所有分区并格式化整块磁盘吗? (输入 YES 确认): " DIE_CONFIRM
-        if [ "$DIE_CONFIRM" != "YES" ]; then
-            echo "操作已终止。请重新运行脚本并选择子分区。"
-            exit 1
-        fi
+    HAS_CHILDREN=$(lsblk -n --output NAME "$TARGET_DEV" | wc -l)
+    if [ "$HAS_CHILDREN" -gt 1 ]; then
+        echo -e "${RED}严重警告: 设备 $TARGET_DEV 似乎包含分区 (例如 ${TARGET_DEV_NAME}1)。${NC}"
+        echo -e "${RED}通常你应该挂载它的子分区，而不是整个磁盘！${NC}"
+        echo -e "${RED}格式化整个磁盘将清除所有分区表！${NC}"
     fi
 
-    echo -e "${WHITE}警告: 设备 $TARGET_DEV 尚未格式化。${NC}"
-    echo -e "${RED}注意: 格式化将 清除 数据！${NC}"
-    echo "请选择文件系统:"
-    echo " 1) ext4 (推荐)"
-    echo " 2) xfs"
-    echo " 3) 取消"
-    read -p "选项 [1-3]: " FORMAT_CHOICE
+    echo -e "${RED}注意: 格式化将 清除 该设备上的所有数据！${NC}"
+    echo "请选择文件系统格式:"
+    echo " 1) ext4 (推荐，兼容性好)"
+    echo " 2) xfs  (适合大文件)"
+    echo " 3) 取消操作"
+    read -p "请输入选项 [1-3]: " FORMAT_CHOICE
 
     case "$FORMAT_CHOICE" in
         1)
-            echo "格式化为 ext4 ..."
-            mkfs.ext4 -F "$TARGET_DEV" || exit 1
+            echo "正在将 $TARGET_DEV 格式化为 ext4 ..."
+            mkfs.ext4 -F "$TARGET_DEV"
+            if [ $? -ne 0 ]; then echo -e "${RED}格式化失败!${NC}"; exit 1; fi
             DEV_FSTYPE="ext4"
+            echo -e "${GREEN}格式化完成。${NC}"
             ;;
         2)
-            if ! command -v mkfs.xfs &> /dev/null; then echo "未找到 mkfs.xfs"; exit 1; fi
-            echo "格式化为 xfs ..."
-            mkfs.xfs -f "$TARGET_DEV" || exit 1
+            if ! command -v mkfs.xfs &> /dev/null; then
+                echo -e "${RED}错误: 未找到 xfs 工具 (xfsprogs)。请选择 ext4 或先安装工具。${NC}"
+                exit 1
+            fi
+            echo "正在将 $TARGET_DEV 格式化为 xfs ..."
+            mkfs.xfs -f "$TARGET_DEV"
+            if [ $? -ne 0 ]; then echo -e "${RED}格式化失败!${NC}"; exit 1; fi
             DEV_FSTYPE="xfs"
+            echo -e "${GREEN}格式化完成。${NC}"
             ;;
-        *) exit 1 ;;
+        *)
+            echo "操作已取消。"
+            exit 1
+            ;;
     esac
 fi
 
 # ===========================
-#  处理已挂载
+#  处理已挂载设备
 # ===========================
 CURRENT_MOUNT=$(lsblk -no MOUNTPOINT "$TARGET_DEV" | head -n 1)
 
 if [ -n "$CURRENT_MOUNT" ]; then
-    echo -e "${YELLOW}设备已挂载于: $CURRENT_MOUNT${NC}"
-    read -p "是否卸载并重挂? [y/N]: " CONFIRM_UMOUNT
+    echo ""
+    echo -e "${YELLOW}检测到设备 $TARGET_DEV 当前已挂载于: $CURRENT_MOUNT${NC}"
+    echo -e "你需要先卸载它，才能挂载到新位置。"
+    read -p "是否立即卸载并继续? [y/N]: " CONFIRM_UMOUNT
+    
     if [[ "$CONFIRM_UMOUNT" =~ ^[Yy]$ ]]; then
-        lsblk -rn -o MOUNTPOINT "$TARGET_DEV" | grep -v "^$" | while read -r mp; do umount "$mp"; done
-        umount "$TARGET_DEV" 2>/dev/null
+        echo "正在卸载 $TARGET_DEV ..."
+        lsblk -rn -o MOUNTPOINT "$TARGET_DEV" | grep -v "^$" | while read -r mp; do
+             umount "$mp" 2>/dev/null
+        done
+        umount "$TARGET_DEV" 2>/dev/null 
+        
+        if [ -n "$(lsblk -no MOUNTPOINT "$TARGET_DEV")" ]; then
+             echo -e "${RED}卸载失败! 设备正被使用。请手动停止相关进程后重试。${NC}"
+             exit 1
+        fi
+        echo -e "${GREEN}卸载成功。${NC}"
     else
+        echo "操作取消。"
         exit 0
     fi
 fi
 
-# 挂载逻辑
 echo ""
-echo -e "${YELLOW}请输入新挂载点 (例: /mnt/data):${NC}"
+echo -e "${YELLOW}请输入新的挂载点路径 (例如: /mnt/data):${NC}"
 read -r MOUNT_POINT
 [ -z "$MOUNT_POINT" ] && exit 1
-[ ! -d "$MOUNT_POINT" ] && mkdir -p "$MOUNT_POINT"
 
-mount "$TARGET_DEV" "$MOUNT_POINT" || { echo -e "${RED}挂载失败${NC}"; exit 1; }
+if [ ! -d "$MOUNT_POINT" ]; then
+    mkdir -p "$MOUNT_POINT"
+    echo "创建目录: $MOUNT_POINT"
+fi
 
-# Fstab
+echo "正在挂载 $TARGET_DEV ($DEV_FSTYPE) 到 $MOUNT_POINT ..."
+mount "$TARGET_DEV" "$MOUNT_POINT"
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}挂载失败!${NC}"
+    exit 1
+fi
+
+# ===========================
+#  配置 Fstab
+# ===========================
 echo ""
-read -p "更新 /etc/fstab? [y/N]: " ENABLE_BOOT
+read -p "是否更新开机自动挂载 (/etc/fstab)? [y/N]: " ENABLE_BOOT
+
 if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
     UUID=$(blkid -s UUID -o value "$TARGET_DEV")
-    [ -z "$UUID" ] && partprobe "$TARGET_DEV" && sleep 1 && UUID=$(blkid -s UUID -o value "$TARGET_DEV")
-    
-    if [ -n "$UUID" ]; then
+    if [ -z "$UUID" ]; then
+        partprobe "$TARGET_DEV" 2>/dev/null
+        sleep 1
+        UUID=$(blkid -s UUID -o value "$TARGET_DEV")
+    fi
+
+    if [ -z "$UUID" ]; then
+         echo -e "${RED}获取 UUID 失败，跳过 fstab 更新。${NC}"
+    else
         cp /etc/fstab /etc/fstab.bak.$(date +%s)
-        if grep -q "$UUID" /etc/fstab; then sed -i "s|^UUID=$UUID|# &|g" /etc/fstab; fi
-        if [ -n "$CURRENT_MOUNT" ]; then 
-            ESC=$(echo "$CURRENT_MOUNT" | sed 's/\//\\\//g')
-            sed -i "/^[^#].*[[:space:]]${ESC}[[:space:]]/s/^/# /" /etc/fstab
+        echo "已备份 /etc/fstab"
+        
+        if grep -q "$UUID" /etc/fstab; then
+            sed -i "s|^UUID=$UUID|# [Modified] UUID=$UUID|g" /etc/fstab
         fi
         
+        if [ -n "$CURRENT_MOUNT" ]; then
+            ESC_OLD_MOUNT=$(echo "$CURRENT_MOUNT" | sed 's/\//\\\//g')
+            sed -i "/^[^#].*[[:space:]]${ESC_OLD_MOUNT}[[:space:]]/s/^/# [Modified Old Path] /" /etc/fstab
+        fi
+
         echo "UUID=$UUID $MOUNT_POINT $DEV_FSTYPE defaults 0 0" >> /etc/fstab
+        
+        echo "正在刷新 Systemd 缓存..."
         systemctl daemon-reload
+        
+        echo "正在验证 fstab..."
         mount -a
-        echo -e "${GREEN}fstab 更新完毕。${NC}"
+        if [ $? -eq 0 ]; then
+             echo -e "${GREEN}/etc/fstab 更新完成且验证通过。${NC}"
+        else
+             echo -e "${RED}警告: fstab 验证失败! 请检查文件。${NC}"
+        fi
     fi
 fi
 
 echo -e "${BLUE}=== 完成 ===${NC}"
-lsblk -o NAME,FSTYPE,MOUNTPOINT | grep "$(basename "$TARGET_DEV")"
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT | grep "$(basename "$TARGET_DEV")"
