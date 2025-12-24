@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==========================================
-# Linux 通用硬盘挂载脚本 V7 (修复父盘识别Bug)
+# Linux 通用硬盘挂载脚本 V7 (终极修复: 父盘识别)
 # ==========================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'   # 青色：父磁盘
-WHITE='\033[1;37m'  # 高亮白色：空盘
+CYAN='\033[0;36m'   # 青色：父磁盘(含分区)
+WHITE='\033[1;37m'  # 高亮白色：真正的空盘
 NC='\033[0m'
 
 if [[ $EUID -ne 0 ]]; then
@@ -21,44 +21,40 @@ echo -e "${BLUE}=== 正在扫描系统中的块设备 ===${NC}"
 echo ""
 
 # ==========================================
-# 核心修复: 预先获取所有充当"父亲"的设备列表
+# 核心修复逻辑: 预先获取所有"父亲"设备列表
 # ==========================================
-# lsblk -n -o PKNAME 会列出所有设备的父级名称
-# 如果 sda1 的 PKNAME 是 sda，那么 sda 就会出现在这个列表中
-PARENT_DEVS=$(lsblk -n -o PKNAME | sort | uniq)
+# 获取所有设备的父级名称(PKNAME)，如果 sda1 存在，PKNAME里就会有 sda
+# 这样不需要对 sda 单独运行命令，避免 "not a block device" 报错
+ALL_PARENTS=$(lsblk -n -o PKNAME | grep -v "^$" | sort | uniq)
 
-# 列出设备
 echo -e "设备列表:"
 echo "--------------------------------------------------------------------------------"
 printf "%-15s %-10s %-10s %-10s %-25s\n" "设备名" "大小" "类型" "文件系统" "当前状态/挂载点"
 echo "--------------------------------------------------------------------------------"
 
+# 使用 -P 模式确保解析准确
 lsblk -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read -r line; do
     eval "$line"
     
-    # 过滤掉 loop 和 rom
     if [[ "$TYPE" == "rom" || "$TYPE" == "loop" ]]; then continue; fi
     
-    # 判断当前设备是否在 PARENT_DEVS 列表中
-    # 使用 grep -w 精确匹配全词 (防止 sda 匹配到 sda1)
+    # 检查当前设备名是否在"父亲名单"里
     IS_PARENT=0
-    if echo "$PARENT_DEVS" | grep -q -w "$NAME"; then
+    if echo "$ALL_PARENTS" | grep -q -w "$NAME"; then
         IS_PARENT=1
     fi
 
-    # --- 颜色与状态判断逻辑 ---
-    
+    # --- 颜色判断逻辑 ---
     if [[ -n "$MOUNTPOINT" ]]; then
         # 黄色：已挂载
         printf "${YELLOW}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "$MOUNTPOINT"
         
     elif [[ "$IS_PARENT" -eq 1 ]]; then
-        # 青色：它是父磁盘 (因为它出现在了别人的 PKNAME 里)
-        # 即使它没有 FSTYPE，也不应该被当作空盘格式化
+        # 青色：它是父磁盘 (因为它是别人的 PKNAME) -> 保护起来
         printf "${CYAN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(分区表)" "(含分区-请操作子设备)"
         
     elif [[ -n "$FSTYPE" ]]; then
-        # 绿色：有文件系统但未挂载 (且不是父盘，或者虽是父盘但有fs通常不常见)
+        # 绿色：有文件系统但未挂载
         printf "${GREEN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "(未挂载)"
         
     else
@@ -73,7 +69,8 @@ echo ""
 # 交互输入
 echo -e "${YELLOW}请输入要操作的设备名称 (例如: sdb 或 sdb1):${NC}"
 read -r TARGET_DEV_NAME
-if [[ "$TARGET_DEV_NAME" != /dev/* ]]; then TARGET_DEV="/dev/$TARGET_DEV_NAME"; fi
+# 自动补全 /dev/，并确保不重复
+if [[ "$TARGET_DEV_NAME" != /dev/* ]]; then TARGET_DEV="/dev/$TARGET_DEV_NAME"; else TARGET_DEV="$TARGET_DEV_NAME"; fi
 
 if [ ! -b "$TARGET_DEV" ]; then
     echo -e "${RED}错误: 设备 $TARGET_DEV 不存在!${NC}"
@@ -88,17 +85,12 @@ DEV_FSTYPE=$(lsblk -no FSTYPE "$TARGET_DEV")
 if [ -z "$DEV_FSTYPE" ]; then
     echo ""
     
-    # 再次检查是否为父盘 (防止用户强行输入 sda)
-    # 使用 V7 的 PKNAME 逻辑进行双重验证
-    IS_PARENT_CHECK=$(lsblk -n -o PKNAME | grep -w "$(basename "$TARGET_DEV")")
-    # 或者检查该设备是否有子节点
-    CHILD_CHECK=$(lsblk -n --list --output PKNAME | grep -w "$(basename "$TARGET_DEV")")
-    
-    if [ -n "$CHILD_CHECK" ]; then
+    # V7 安全检查: 使用全局名单再次确认是否为父盘
+    if lsblk -n -o PKNAME | grep -q -w "$(basename "$TARGET_DEV")"; then
         echo -e "${RED}=======================================================${NC}"
-        echo -e "${RED}危险警告! 你选择了 $TARGET_DEV，这是一个包含分区的物理磁盘。${NC}"
-        echo -e "${RED}它下面似乎已经有分区了。${NC}"
-        echo -e "${RED}如果你继续格式化 $TARGET_DEV，所有分区和数据都将丢失！${NC}"
+        echo -e "${RED}严重警告! 你选择了 $TARGET_DEV，这是一个包含分区的物理父盘。${NC}"
+        echo -e "${RED}它下面似乎已经有分区了 (它是其他设备的 PKNAME)。${NC}"
+        echo -e "${RED}如果你继续格式化 $TARGET_DEV，该盘所有分区表都将丢失！${NC}"
         echo -e "${RED}=======================================================${NC}"
         read -p "你确定要毁灭所有分区并格式化整块磁盘吗? (输入 YES 确认): " DIE_CONFIRM
         if [ "$DIE_CONFIRM" != "YES" ]; then
