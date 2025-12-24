@@ -311,9 +311,12 @@ while true; do
   echo -e "   日志: ${CYAN}$LOG_FILE${NC}"
   echo -e "${BLUE}========================================${NC}"
   
-  printf " 1. 安装 Python  [当前: %s]\n" "$MSG_PY"
-  printf " 2. 安装 Golang  [当前: %s]\n" "$MSG_GO"
-  printf " 3. 安装 Node.js [当前: %s]\n" "$MSG_NODE"
+  # === 修复: 使用 %b 解析颜色转义符 ===
+  printf " 1. 安装 Python  [当前: %b]\n" "$MSG_PY"
+  printf " 2. 安装 Golang  [当前: %b]\n" "$MSG_GO"
+  printf " 3. 安装 Node.js [当前: %b]\n" "$MSG_NODE"
+  # ==================================
+
   echo   " 4. 日志管理系统 (查看/清理)"
   echo   " 5. 退出"
   echo -e "${BLUE}========================================${NC}"
