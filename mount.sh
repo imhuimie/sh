@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Linux 通用硬盘挂载脚本 V3 (修复重挂载与Systemd刷新)
+# Linux 通用硬盘挂载脚本 V4 (新增：自动格式化功能)
 # ==========================================
 
 RED='\033[0;31m'
@@ -32,15 +32,16 @@ lsblk -rno NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read -r name size type fstyp
     elif [[ -n "$mountpoint" ]]; then
         printf "${YELLOW}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$name" "$size" "$type" "$fstype" "$mountpoint"
     else
-        printf "%-15s %-10s %-10s %-10s %-25s\n" "$name" "$size" "$type" "$fstype" ""
+        # 未格式化/无文件系统的设备显示为白色/普通色
+        printf "%-15s %-10s %-10s %-10s %-25s\n" "$name" "$size" "$type" "${fstype:-(未格式化)}" ""
     fi
 done
 echo "--------------------------------------------------------------------------------"
-echo -e "${GREEN}绿色${NC}: 建议挂载 | ${YELLOW}黄色${NC}: 已挂载(支持重新挂载)"
+echo -e "${GREEN}绿色${NC}: 建议挂载 | ${YELLOW}黄色${NC}: 已挂载 | 白色: 需格式化"
 echo ""
 
 # 交互输入
-echo -e "${YELLOW}请输入要挂载的设备名称 (例如: sdb1):${NC}"
+echo -e "${YELLOW}请输入要操作的设备名称 (例如: sdb 或 sdb1):${NC}"
 read -r TARGET_DEV
 if [[ "$TARGET_DEV" != /dev/* ]]; then TARGET_DEV="/dev/$TARGET_DEV"; fi
 
@@ -49,18 +50,51 @@ if [ ! -b "$TARGET_DEV" ]; then
     exit 1
 fi
 
+# ===========================
+#  核心优化：格式化检测与处理
+# ===========================
 DEV_FSTYPE=$(lsblk -no FSTYPE "$TARGET_DEV")
+
 if [ -z "$DEV_FSTYPE" ]; then
-    echo -e "${RED}错误: 设备未格式化，无法挂载。${NC}"
-    exit 1
+    echo ""
+    echo -e "${RED}警告: 检测到设备 $TARGET_DEV 尚未格式化 (无文件系统)。${NC}"
+    echo -e "${RED}注意: 格式化将 清除 该设备上的所有数据！${NC}"
+    echo "请选择文件系统格式:"
+    echo " 1) ext4 (推荐，兼容性好)"
+    echo " 2) xfs  (适合大文件)"
+    echo " 3) 取消操作"
+    read -p "请输入选项 [1-3]: " FORMAT_CHOICE
+
+    case "$FORMAT_CHOICE" in
+        1)
+            echo "正在将 $TARGET_DEV 格式化为 ext4 ..."
+            mkfs.ext4 -F "$TARGET_DEV"
+            if [ $? -ne 0 ]; then echo -e "${RED}格式化失败!${NC}"; exit 1; fi
+            DEV_FSTYPE="ext4"
+            echo -e "${GREEN}格式化完成。${NC}"
+            ;;
+        2)
+            if ! command -v mkfs.xfs &> /dev/null; then
+                echo -e "${RED}错误: 未找到 xfs 工具 (xfsprogs)。请选择 ext4 或先安装工具。${NC}"
+                exit 1
+            fi
+            echo "正在将 $TARGET_DEV 格式化为 xfs ..."
+            mkfs.xfs -f "$TARGET_DEV"
+            if [ $? -ne 0 ]; then echo -e "${RED}格式化失败!${NC}"; exit 1; fi
+            DEV_FSTYPE="xfs"
+            echo -e "${GREEN}格式化完成。${NC}"
+            ;;
+        *)
+            echo "操作已取消。"
+            exit 1
+            ;;
+    esac
 fi
 
 # ===========================
-#  处理已挂载设备
+#  处理已挂载设备 (原有逻辑)
 # ===========================
-CURRENT_MOUNT=$(lsblk -no MOUNTPOINT "$TARGET_DEV")
-# 注意：lsblk可能返回多行，如果挂载了多次，这里只取第一行或全部处理需要小心
-# 为了简单起见，我们检测是否非空
+CURRENT_MOUNT=$(lsblk -no MOUNTPOINT "$TARGET_DEV" | head -n 1) # 仅取第一行防止多重挂载报错
 
 if [ -n "$CURRENT_MOUNT" ]; then
     echo ""
@@ -69,16 +103,13 @@ if [ -n "$CURRENT_MOUNT" ]; then
     read -p "是否立即卸载并继续? [y/N]: " CONFIRM_UMOUNT
     
     if [[ "$CONFIRM_UMOUNT" =~ ^[Yy]$ ]]; then
-        echo "正在卸载 $TARGET_DEV (及其所有挂载点)..."
-        # 使用 umount -A 尝试卸载该设备的所有挂载点 (如果支持)，或者循环卸载
-        for mpoint in $CURRENT_MOUNT; do
-            umount "$mpoint" 2>/dev/null
-            if [ $? -eq 0 ]; then
-                echo "已卸载: $mpoint"
-            else
-                umount "$TARGET_DEV" 2>/dev/null 
-            fi
+        echo "正在卸载 $TARGET_DEV ..."
+        # 尝试卸载所有挂载点
+        lsblk -rn -o MOUNTPOINT "$TARGET_DEV" | grep -v "^$" | while read -r mp; do
+             umount "$mp" 2>/dev/null
         done
+        # 兜底再次卸载设备本身
+        umount "$TARGET_DEV" 2>/dev/null 
         
         # 再次检查
         if [ -n "$(lsblk -no MOUNTPOINT "$TARGET_DEV")" ]; then
@@ -104,7 +135,7 @@ if [ ! -d "$MOUNT_POINT" ]; then
 fi
 
 # 执行挂载
-echo "正在挂载 $TARGET_DEV 到 $MOUNT_POINT ..."
+echo "正在挂载 $TARGET_DEV ($DEV_FSTYPE) 到 $MOUNT_POINT ..."
 mount "$TARGET_DEV" "$MOUNT_POINT"
 
 if [ $? -ne 0 ]; then
@@ -112,38 +143,43 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 配置 Fstab
+# ===========================
+#  配置 Fstab (原有逻辑)
+# ===========================
 echo ""
 read -p "是否更新开机自动挂载 (/etc/fstab)? [y/N]: " ENABLE_BOOT
 
 if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
     UUID=$(blkid -s UUID -o value "$TARGET_DEV")
     if [ -z "$UUID" ]; then
-        echo "错误: 无法获取 UUID。"
+        echo "错误: 无法获取 UUID (可能需要重新运行 blkid)。"
+        # 尝试刷新一下
+        partprobe "$TARGET_DEV" 2>/dev/null
+        sleep 1
+        UUID=$(blkid -s UUID -o value "$TARGET_DEV")
+    fi
+
+    if [ -z "$UUID" ]; then
+         echo -e "${RED}获取 UUID 失败，跳过 fstab 更新。${NC}"
     else
         cp /etc/fstab /etc/fstab.bak.$(date +%s)
         echo "已备份 /etc/fstab"
         
-        # 1. 清理旧记录 (增强版)
-        # 不仅匹配 UUID，如果旧挂载点存在，也注释掉包含旧挂载点的行
+        # 清理旧记录
         if grep -q "$UUID" /etc/fstab; then
             sed -i "s|^UUID=$UUID|# [Modified] UUID=$UUID|g" /etc/fstab
-            echo "注释掉旧的 UUID 记录..."
         fi
         
-        # 如果刚才有旧挂载点，尝试根据路径清理 (防止 fstab 使用的是设备名而非UUID的情况)
         if [ -n "$CURRENT_MOUNT" ]; then
-            # 转义斜杠以用于 sed
             ESC_OLD_MOUNT=$(echo "$CURRENT_MOUNT" | sed 's/\//\\\//g')
-            # 只有当行没有被注释(#开头) 且 包含旧挂载点时才注释
             sed -i "/^[^#].*[[:space:]]${ESC_OLD_MOUNT}[[:space:]]/s/^/# [Modified Old Path] /" /etc/fstab
         fi
 
-        # 2. 写入新记录
+        # 写入新记录
         echo "UUID=$UUID $MOUNT_POINT $DEV_FSTYPE defaults 0 0" >> /etc/fstab
         
-        # 3. 关键修复：刷新 Systemd
-        echo "正在刷新 Systemd 缓存 (systemctl daemon-reload)..."
+        # 刷新 Systemd
+        echo "正在刷新 Systemd 缓存..."
         systemctl daemon-reload
         
         echo "正在验证 fstab..."
@@ -152,10 +188,9 @@ if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
              echo -e "${GREEN}/etc/fstab 更新完成且验证通过。${NC}"
         else
              echo -e "${RED}警告: fstab 验证失败! 请检查文件。${NC}"
-             # 并不自动还原，因为可能只是小错误，让用户看提示更好
         fi
     fi
 fi
 
 echo -e "${BLUE}=== 完成 ===${NC}"
-lsblk -o NAME,FSTYPE,MOUNTPOINT | grep "$TARGET_DEV"
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT | grep "$(basename "$TARGET_DEV")"
