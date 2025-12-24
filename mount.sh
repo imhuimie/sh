@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # ==========================================
-# Linux 通用硬盘挂载脚本 V4 (新增：自动格式化功能)
+# Linux 通用硬盘挂载脚本 V4.1 (修复颜色显示)
 # ==========================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+WHITE='\033[1;37m'  # 新增：高亮白色
 NC='\033[0m'
 
 if [[ $EUID -ne 0 ]]; then
@@ -28,16 +29,19 @@ lsblk -rno NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read -r name size type fstyp
     if [[ "$type" == "rom" || "$type" == "loop" ]]; then continue; fi
     
     if [[ -z "$mountpoint" && -n "$fstype" ]]; then
+        # 绿色：有文件系统且未挂载
         printf "${GREEN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$name" "$size" "$type" "$fstype" "(未挂载)"
     elif [[ -n "$mountpoint" ]]; then
+        # 黄色：已挂载
         printf "${YELLOW}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$name" "$size" "$type" "$fstype" "$mountpoint"
     else
-        # 未格式化/无文件系统的设备显示为白色/普通色
-        printf "%-15s %-10s %-10s %-10s %-25s\n" "$name" "$size" "$type" "${fstype:-(未格式化)}" ""
+        # 白色：无文件系统 (需格式化) -> 这里显式加上了 ${WHITE}
+        printf "${WHITE}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$name" "$size" "$type" "${fstype:-(未格式化)}" ""
     fi
 done
 echo "--------------------------------------------------------------------------------"
-echo -e "${GREEN}绿色${NC}: 建议挂载 | ${YELLOW}黄色${NC}: 已挂载 | 白色: 需格式化"
+# 图例也加上了颜色代码
+echo -e "${GREEN}绿色${NC}: 建议挂载 | ${YELLOW}黄色${NC}: 已挂载 | ${WHITE}白色${NC}: 需格式化"
 echo ""
 
 # 交互输入
@@ -51,13 +55,13 @@ if [ ! -b "$TARGET_DEV" ]; then
 fi
 
 # ===========================
-#  核心优化：格式化检测与处理
+#  格式化检测与处理
 # ===========================
 DEV_FSTYPE=$(lsblk -no FSTYPE "$TARGET_DEV")
 
 if [ -z "$DEV_FSTYPE" ]; then
     echo ""
-    echo -e "${RED}警告: 检测到设备 $TARGET_DEV 尚未格式化 (无文件系统)。${NC}"
+    echo -e "${WHITE}警告: 检测到设备 $TARGET_DEV 尚未格式化 (无文件系统)。${NC}"
     echo -e "${RED}注意: 格式化将 清除 该设备上的所有数据！${NC}"
     echo "请选择文件系统格式:"
     echo " 1) ext4 (推荐，兼容性好)"
@@ -92,9 +96,9 @@ if [ -z "$DEV_FSTYPE" ]; then
 fi
 
 # ===========================
-#  处理已挂载设备 (原有逻辑)
+#  处理已挂载设备
 # ===========================
-CURRENT_MOUNT=$(lsblk -no MOUNTPOINT "$TARGET_DEV" | head -n 1) # 仅取第一行防止多重挂载报错
+CURRENT_MOUNT=$(lsblk -no MOUNTPOINT "$TARGET_DEV" | head -n 1)
 
 if [ -n "$CURRENT_MOUNT" ]; then
     echo ""
@@ -104,14 +108,11 @@ if [ -n "$CURRENT_MOUNT" ]; then
     
     if [[ "$CONFIRM_UMOUNT" =~ ^[Yy]$ ]]; then
         echo "正在卸载 $TARGET_DEV ..."
-        # 尝试卸载所有挂载点
         lsblk -rn -o MOUNTPOINT "$TARGET_DEV" | grep -v "^$" | while read -r mp; do
              umount "$mp" 2>/dev/null
         done
-        # 兜底再次卸载设备本身
         umount "$TARGET_DEV" 2>/dev/null 
         
-        # 再次检查
         if [ -n "$(lsblk -no MOUNTPOINT "$TARGET_DEV")" ]; then
              echo -e "${RED}卸载失败! 设备正被使用。请手动停止相关进程后重试。${NC}"
              exit 1
@@ -144,7 +145,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # ===========================
-#  配置 Fstab (原有逻辑)
+#  配置 Fstab
 # ===========================
 echo ""
 read -p "是否更新开机自动挂载 (/etc/fstab)? [y/N]: " ENABLE_BOOT
@@ -153,7 +154,6 @@ if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
     UUID=$(blkid -s UUID -o value "$TARGET_DEV")
     if [ -z "$UUID" ]; then
         echo "错误: 无法获取 UUID (可能需要重新运行 blkid)。"
-        # 尝试刷新一下
         partprobe "$TARGET_DEV" 2>/dev/null
         sleep 1
         UUID=$(blkid -s UUID -o value "$TARGET_DEV")
@@ -165,7 +165,6 @@ if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
         cp /etc/fstab /etc/fstab.bak.$(date +%s)
         echo "已备份 /etc/fstab"
         
-        # 清理旧记录
         if grep -q "$UUID" /etc/fstab; then
             sed -i "s|^UUID=$UUID|# [Modified] UUID=$UUID|g" /etc/fstab
         fi
@@ -175,10 +174,8 @@ if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
             sed -i "/^[^#].*[[:space:]]${ESC_OLD_MOUNT}[[:space:]]/s/^/# [Modified Old Path] /" /etc/fstab
         fi
 
-        # 写入新记录
         echo "UUID=$UUID $MOUNT_POINT $DEV_FSTYPE defaults 0 0" >> /etc/fstab
         
-        # 刷新 Systemd
         echo "正在刷新 Systemd 缓存..."
         systemctl daemon-reload
         
