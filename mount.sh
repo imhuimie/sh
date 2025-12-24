@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==========================================
-# Linux 通用硬盘挂载脚本 V6 (智能识别分区结构)
+# Linux 通用硬盘挂载脚本 V7 (修复父盘识别Bug)
 # ==========================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'   # 新增：青色用于显示父磁盘
-WHITE='\033[1;37m'  # 高亮白色用于未格式化
+CYAN='\033[0;36m'   # 青色：父磁盘
+WHITE='\033[1;37m'  # 高亮白色：空盘
 NC='\033[0m'
 
 if [[ $EUID -ne 0 ]]; then
@@ -19,6 +19,13 @@ fi
 
 echo -e "${BLUE}=== 正在扫描系统中的块设备 ===${NC}"
 echo ""
+
+# ==========================================
+# 核心修复: 预先获取所有充当"父亲"的设备列表
+# ==========================================
+# lsblk -n -o PKNAME 会列出所有设备的父级名称
+# 如果 sda1 的 PKNAME 是 sda，那么 sda 就会出现在这个列表中
+PARENT_DEVS=$(lsblk -n -o PKNAME | sort | uniq)
 
 # 列出设备
 echo -e "设备列表:"
@@ -32,32 +39,31 @@ lsblk -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read -r line; do
     # 过滤掉 loop 和 rom
     if [[ "$TYPE" == "rom" || "$TYPE" == "loop" ]]; then continue; fi
     
-    # 逻辑判断
+    # 判断当前设备是否在 PARENT_DEVS 列表中
+    # 使用 grep -w 精确匹配全词 (防止 sda 匹配到 sda1)
+    IS_PARENT=0
+    if echo "$PARENT_DEVS" | grep -q -w "$NAME"; then
+        IS_PARENT=1
+    fi
+
+    # --- 颜色与状态判断逻辑 ---
+    
     if [[ -n "$MOUNTPOINT" ]]; then
         # 黄色：已挂载
         printf "${YELLOW}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "$MOUNTPOINT"
         
+    elif [[ "$IS_PARENT" -eq 1 ]]; then
+        # 青色：它是父磁盘 (因为它出现在了别人的 PKNAME 里)
+        # 即使它没有 FSTYPE，也不应该被当作空盘格式化
+        printf "${CYAN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(分区表)" "(含分区-请操作子设备)"
+        
     elif [[ -n "$FSTYPE" ]]; then
-        # 绿色：有文件系统但未挂载
+        # 绿色：有文件系统但未挂载 (且不是父盘，或者虽是父盘但有fs通常不常见)
         printf "${GREEN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "(未挂载)"
         
     else
-        # 关键修改：检查是否为“父磁盘” (即包含子分区的 disk)
-        IS_PARENT=0
-        if [[ "$TYPE" == "disk" ]]; then
-            # 检查该设备下是否有子节点
-            # lsblk 列出该设备及其依赖，如果行数 > 1 说明有分区
-            CHILD_COUNT=$(lsblk -n --list --output NAME "$NAME" | wc -l)
-            if [ "$CHILD_COUNT" -gt 1 ]; then IS_PARENT=1; fi
-        fi
-
-        if [[ "$IS_PARENT" -eq 1 ]]; then
-            # 青色：父磁盘 (包含分区，不建议直接操作)
-            printf "${CYAN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(分区表)" "(含分区-请操作子设备)"
-        else
-            # 白色：真正的空盘 (无分区且无文件系统)
-            printf "${WHITE}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(未格式化)" "(建议挂载)"
-        fi
+        # 白色：既没挂载，也没文件系统，也不是任何人的父亲 -> 真正的空盘
+        printf "${WHITE}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(未格式化)" "(建议挂载)"
     fi
 done
 echo "--------------------------------------------------------------------------------"
@@ -82,17 +88,21 @@ DEV_FSTYPE=$(lsblk -no FSTYPE "$TARGET_DEV")
 if [ -z "$DEV_FSTYPE" ]; then
     echo ""
     
-    # 二次安全检查：如果用户强行输入了 sda (父磁盘)
-    HAS_CHILDREN=$(lsblk -n --output NAME "$TARGET_DEV" | wc -l)
-    if [ "$HAS_CHILDREN" -gt 1 ]; then
+    # 再次检查是否为父盘 (防止用户强行输入 sda)
+    # 使用 V7 的 PKNAME 逻辑进行双重验证
+    IS_PARENT_CHECK=$(lsblk -n -o PKNAME | grep -w "$(basename "$TARGET_DEV")")
+    # 或者检查该设备是否有子节点
+    CHILD_CHECK=$(lsblk -n --list --output PKNAME | grep -w "$(basename "$TARGET_DEV")")
+    
+    if [ -n "$CHILD_CHECK" ]; then
         echo -e "${RED}=======================================================${NC}"
         echo -e "${RED}危险警告! 你选择了 $TARGET_DEV，这是一个包含分区的物理磁盘。${NC}"
-        echo -e "${RED}它下面似乎已经有分区了 (如 ${TARGET_DEV_NAME}1)。${NC}"
+        echo -e "${RED}它下面似乎已经有分区了。${NC}"
         echo -e "${RED}如果你继续格式化 $TARGET_DEV，所有分区和数据都将丢失！${NC}"
         echo -e "${RED}=======================================================${NC}"
         read -p "你确定要毁灭所有分区并格式化整块磁盘吗? (输入 YES 确认): " DIE_CONFIRM
         if [ "$DIE_CONFIRM" != "YES" ]; then
-            echo "操作已终止。请重新运行脚本并选择子分区 (例如 ${TARGET_DEV_NAME}1)。"
+            echo "操作已终止。请重新运行脚本并选择子分区。"
             exit 1
         fi
     fi
@@ -122,7 +132,7 @@ if [ -z "$DEV_FSTYPE" ]; then
 fi
 
 # ===========================
-#  处理已挂载 (同前)
+#  处理已挂载
 # ===========================
 CURRENT_MOUNT=$(lsblk -no MOUNTPOINT "$TARGET_DEV" | head -n 1)
 
@@ -155,7 +165,6 @@ if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
     
     if [ -n "$UUID" ]; then
         cp /etc/fstab /etc/fstab.bak.$(date +%s)
-        # 移除旧记录
         if grep -q "$UUID" /etc/fstab; then sed -i "s|^UUID=$UUID|# &|g" /etc/fstab; fi
         if [ -n "$CURRENT_MOUNT" ]; then 
             ESC=$(echo "$CURRENT_MOUNT" | sed 's/\//\\\//g')
