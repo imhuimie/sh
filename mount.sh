@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # ==========================================
-# Linux 通用硬盘挂载脚本 V4.1 (修复颜色显示)
+# Linux 通用硬盘挂载脚本 V5 (修复颜色解析Bug)
 # ==========================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-WHITE='\033[1;37m'  # 新增：高亮白色
+WHITE='\033[1;37m'  # 高亮白色
 NC='\033[0m'
 
 if [[ $EUID -ne 0 ]]; then
@@ -25,29 +25,37 @@ echo "--------------------------------------------------------------------------
 printf "%-15s %-10s %-10s %-10s %-25s\n" "设备名" "大小" "类型" "文件系统" "当前挂载点"
 echo "--------------------------------------------------------------------------------"
 
-lsblk -rno NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read -r name size type fstype mountpoint; do
-    if [[ "$type" == "rom" || "$type" == "loop" ]]; then continue; fi
+# 使用 -P (Pairs) 模式，确保变量绝对准确，不会因为空值而错位
+# 格式示例: NAME="sda" SIZE="20G" TYPE="disk" FSTYPE="" MOUNTPOINT=""
+lsblk -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | while read -r line; do
+    # 使用 eval 解析 key="value" 格式
+    eval "$line"
     
-    if [[ -z "$mountpoint" && -n "$fstype" ]]; then
-        # 绿色：有文件系统且未挂载
-        printf "${GREEN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$name" "$size" "$type" "$fstype" "(未挂载)"
-    elif [[ -n "$mountpoint" ]]; then
-        # 黄色：已挂载
-        printf "${YELLOW}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$name" "$size" "$type" "$fstype" "$mountpoint"
+    # 过滤掉 loop 和 rom 设备
+    if [[ "$TYPE" == "rom" || "$TYPE" == "loop" ]]; then continue; fi
+    
+    # 逻辑判断
+    if [[ -n "$MOUNTPOINT" ]]; then
+        # 情况1: 已挂载 -> 黄色
+        printf "${YELLOW}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "$MOUNTPOINT"
+    elif [[ -n "$FSTYPE" ]]; then
+        # 情况2: 未挂载 但 有文件系统 -> 绿色
+        printf "${GREEN}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "$FSTYPE" "(未挂载)"
     else
-        # 白色：无文件系统 (需格式化) -> 这里显式加上了 ${WHITE}
-        printf "${WHITE}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$name" "$size" "$type" "${fstype:-(未格式化)}" ""
+        # 情况3: 无挂载点 且 无文件系统 -> 白色 (需格式化)
+        # 注意: sda (disk) 如果下面有 sda1 (part)，sda 本身通常无文件系统，也会显示白色，这是正常的
+        printf "${WHITE}%-15s %-10s %-10s %-10s %-25s${NC}\n" "$NAME" "$SIZE" "$TYPE" "(未格式化)" ""
     fi
 done
 echo "--------------------------------------------------------------------------------"
-# 图例也加上了颜色代码
 echo -e "${GREEN}绿色${NC}: 建议挂载 | ${YELLOW}黄色${NC}: 已挂载 | ${WHITE}白色${NC}: 需格式化"
 echo ""
 
 # 交互输入
 echo -e "${YELLOW}请输入要操作的设备名称 (例如: sdb 或 sdb1):${NC}"
-read -r TARGET_DEV
-if [[ "$TARGET_DEV" != /dev/* ]]; then TARGET_DEV="/dev/$TARGET_DEV"; fi
+read -r TARGET_DEV_NAME
+# 自动补全 /dev/
+if [[ "$TARGET_DEV_NAME" != /dev/* ]]; then TARGET_DEV="/dev/$TARGET_DEV_NAME"; fi
 
 if [ ! -b "$TARGET_DEV" ]; then
     echo -e "${RED}错误: 设备 $TARGET_DEV 不存在!${NC}"
@@ -62,6 +70,16 @@ DEV_FSTYPE=$(lsblk -no FSTYPE "$TARGET_DEV")
 if [ -z "$DEV_FSTYPE" ]; then
     echo ""
     echo -e "${WHITE}警告: 检测到设备 $TARGET_DEV 尚未格式化 (无文件系统)。${NC}"
+    
+    # 安全检查: 如果用户选了 sda (disk) 但它其实有分区 (sda1)，提示危险
+    # 检查该设备是否有 Holder (子分区/挂载)
+    HAS_CHILDREN=$(lsblk -n --output NAME "$TARGET_DEV" | wc -l)
+    if [ "$HAS_CHILDREN" -gt 1 ]; then
+        echo -e "${RED}严重警告: 设备 $TARGET_DEV 似乎包含分区 (例如 ${TARGET_DEV_NAME}1)。${NC}"
+        echo -e "${RED}通常你应该挂载它的子分区，而不是整个磁盘！${NC}"
+        echo -e "${RED}格式化整个磁盘将清除所有分区表！${NC}"
+    fi
+
     echo -e "${RED}注意: 格式化将 清除 该设备上的所有数据！${NC}"
     echo "请选择文件系统格式:"
     echo " 1) ext4 (推荐，兼容性好)"
@@ -153,7 +171,6 @@ read -p "是否更新开机自动挂载 (/etc/fstab)? [y/N]: " ENABLE_BOOT
 if [[ "$ENABLE_BOOT" =~ ^[Yy]$ ]]; then
     UUID=$(blkid -s UUID -o value "$TARGET_DEV")
     if [ -z "$UUID" ]; then
-        echo "错误: 无法获取 UUID (可能需要重新运行 blkid)。"
         partprobe "$TARGET_DEV" 2>/dev/null
         sleep 1
         UUID=$(blkid -s UUID -o value "$TARGET_DEV")
